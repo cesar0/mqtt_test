@@ -1,0 +1,15 @@
+dependencies:
+  idf:
+    component_hash: null
+    source:
+      type: idf
+    version: 5.2.2
+  protocol_examples_common:
+    component_hash: null
+    source:
+      path: C:\Users\lixue\esp-idf\esp-idf_v5.2.2\v5.2.2\esp-idf\examples\common_components\protocol_examples_common
+      type: local
+    version: '*'
+manifest_hash: 05c206aadcb656782f9b7f20d4f8df27ae022af537911700e5c202726ca1e4e3
+target: esp32
+version: 1.0.0

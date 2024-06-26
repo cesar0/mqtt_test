@@ -1,0 +1,6 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+  "idf.adapterTargetName": "esp32",
+  "idf.portWin": "COM3"
+}
