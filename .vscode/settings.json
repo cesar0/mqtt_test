@@ -2,5 +2,30 @@
   "C_Cpp.intelliSenseEngine": "default",
   "terminal.integrated.defaultProfile.windows": "PowerShell",
   "idf.adapterTargetName": "esp32",
-  "idf.portWin": "COM3"
+  "idf.portWin": "COM3",
+  "files.associations": {
+    "Makefile": "makefile",
+    "array": "c",
+    "bitset": "c",
+    "string_view": "c",
+    "format": "c",
+    "initializer_list": "c",
+    "span": "c",
+    "regex": "c",
+    "stddef.h": "c",
+    "protocol_examples_common.h": "c",
+    "esp_eth.h": "c",
+    "esp_err.h": "c",
+    "task.h": "c",
+    "esp_system.h": "c",
+    "esp_log.h": "c",
+    "*.tcc": "c",
+    "uart_async_rxtxtasks.h": "c",
+    "mqtt_msg.h": "c",
+    "queue.h": "c",
+    "string": "c",
+    "system_error": "c",
+    "atomic": "c",
+    "mqtt_client.h": "c"
+  }
 }

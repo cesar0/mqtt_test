@@ -15,8 +15,90 @@
 #include "protocol_examples_common.h"
 #include "esp_log.h"
 #include "mqtt_client.h"
+#include "uart_async_rxtxtasks.h"
 
 static const char *TAG = "mqtt5_example";
+
+#define MQTT_RX_MAX_MSG_LEN       1024*9  
+
+
+// 将单个字符转换为对应的16进制值
+int char_to_hex(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    } else if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    } else if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    } else {
+        return -1;
+    }
+}
+
+// 将字符串转换为16进制字节数组
+int string_to_hex(const char *str, uint8_t **out, size_t *out_len) {
+    size_t len = strlen(str);
+    if (len % 2 != 0) {
+        return -1; // 输入字符串长度必须是偶数
+    }
+
+    *out_len = len / 2;
+    *out = (uint8_t *)malloc(*out_len);
+    if (*out == NULL) {
+        return -1; // 内存分配失败
+    }
+
+    for (size_t i = 0; i < len; i += 2) {
+        int high = char_to_hex(str[i]);
+        int low = char_to_hex(str[i + 1]);
+        if (high == -1 || low == -1) {
+            free(*out);
+            return -1; // 非法字符
+        }
+        (*out)[i / 2] = (high << 4) | low;
+    }
+
+    return 0; // 成功
+}
+
+int uart_send_mqtt_msg(const char *str) {
+    uint8_t *hex_data;
+    size_t hex_len;
+
+    if (string_to_hex(str, &hex_data, &hex_len) == 0) {
+        uart_send_data(hex_data, hex_len);
+        free(hex_data);
+    } else {
+        ESP_LOGE(TAG, "Failed to convert string to hex.\n");
+    }
+
+    return 0;
+}
+
+void mqtt_decode(char* buf, int len)
+{
+    int index=0;
+    char* mqttp_msg[5];
+    char *datp;
+
+    datp = strtok(buf, " ");
+    while(datp){
+        mqttp_msg[index] = datp;
+        // logd("\t%s", mqttp_msg[index]);
+        index++;
+        if(index >= 3) break;
+        datp = strtok(NULL," ");
+    }
+    if(index != 3) return;
+    ESP_LOGI(TAG,"mqttp_msg:\n<cmd>%s\n <sn>%s\n <data%d>%s\n",mqttp_msg[0],mqttp_msg[1],strlen(mqttp_msg[2]),mqttp_msg[2]);
+    if(m_bt_state == BT_CONN || 1){
+        uart_send_mqtt_msg(mqttp_msg[2]);
+    }else{
+        ESP_LOGE(TAG, "Failed to connetc bt module.\n");
+    }
+}
+
+
 
 static void log_error_if_nonzero(const char *message, int error_code)
 {
@@ -43,12 +125,17 @@ static esp_mqtt5_publish_property_config_t publish_property = {
 };
 
 static esp_mqtt5_subscribe_property_config_t subscribe_property = {
+    // .subscribe_id = 25555,
+    // .no_local_flag = false,
+    // .retain_as_published_flag = false,
+    // .retain_handle = 0,
+    // .is_share_subscribe = true,
+    // .share_name = "group1",
+
     .subscribe_id = 25555,
-    .no_local_flag = false,
+    .no_local_flag = true,
     .retain_as_published_flag = false,
     .retain_handle = 0,
-    .is_share_subscribe = true,
-    .share_name = "group1",
 };
 
 static esp_mqtt5_subscribe_property_config_t subscribe1_property = {
@@ -108,53 +195,32 @@ static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+
+        //连接发送连接成功消息
         print_user_property(event->property->user_property);
         esp_mqtt5_client_set_user_property(&publish_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
         esp_mqtt5_client_set_publish_property(client, &publish_property);
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 1);
+        msg_id = esp_mqtt_client_publish(client, "blegate/up", "MQTT_EVENT_CONNECTED", 0, 1, 1);
         esp_mqtt5_client_delete_user_property(publish_property.user_property);
         publish_property.user_property = NULL;
-        ESP_LOGI(TAG, "sent publish '/topic/qos1' successful, msg_id=%d", msg_id);
+        ESP_LOGI(TAG, "sent publish '/blegate/up' successful, msg_id=%d", msg_id);
 
+        //订阅消息
         esp_mqtt5_client_set_user_property(&subscribe_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
         esp_mqtt5_client_set_subscribe_property(client, &subscribe_property);
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
+        msg_id = esp_mqtt_client_subscribe(client, "blegate/master1/down", 0);
         esp_mqtt5_client_delete_user_property(subscribe_property.user_property);
         subscribe_property.user_property = NULL;
         ESP_LOGI(TAG, "sent subscribe '/topic/qos0' successful, msg_id=%d", msg_id);
 
-        esp_mqtt5_client_set_user_property(&subscribe1_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
-        esp_mqtt5_client_set_subscribe_property(client, &subscribe1_property);
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 2);
-        esp_mqtt5_client_delete_user_property(subscribe1_property.user_property);
-        subscribe1_property.user_property = NULL;
-        ESP_LOGI(TAG, "sent subscribe '/topic/qos1' successful, msg_id=%d", msg_id);
-
-        esp_mqtt5_client_set_user_property(&unsubscribe_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
-        esp_mqtt5_client_set_unsubscribe_property(client, &unsubscribe_property);
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos0");
-        ESP_LOGI(TAG, "sent unsubscribe '/topic/qos0' successful, msg_id=%d", msg_id);
-        esp_mqtt5_client_delete_user_property(unsubscribe_property.user_property);
-        unsubscribe_property.user_property = NULL;
-
-        esp_mqtt5_client_set_user_property(&subscribe1_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
-        esp_mqtt5_client_set_subscribe_property(client, &subscribe1_property);
-        msg_id = esp_mqtt_client_subscribe(client, "blegate/master1/down", 2);
-        esp_mqtt5_client_delete_user_property(subscribe1_property.user_property);
-        subscribe1_property.user_property = NULL;
-        ESP_LOGI(TAG, "sent subscribe 'blegate/master1/down' successful, msg_id=%d", msg_id);
-
         break;
-    case MQTT_EVENT_DISCONNECTED:
+    case MQTT_EVENT_DISCONNECTED:                   
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         print_user_property(event->property->user_property);
+        esp_mqtt_client_reconnect(client);         //TODO 会概率断开网络连接, 重连前判断网络连接
         break;
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        print_user_property(event->property->user_property);
-        esp_mqtt5_client_set_publish_property(client, &publish_property);
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
-        ESP_LOGI(TAG, "sent publish '/topic/qos0' successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -179,7 +245,17 @@ static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32
         ESP_LOGI(TAG, "correlation_data is %.*s", event->property->correlation_data_len, event->property->correlation_data);
         ESP_LOGI(TAG, "content_type is %.*s", event->property->content_type_len, event->property->content_type);
         ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
-        ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
+        // ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
+        event->data[event->data_len] = 0;           //TODO 有内存溢出风险, 修改上位机发送结束字符
+
+        //解析消息
+        mqtt_decode(event->data,event->data_len);
+
+        //接收数据成功回复接收成功
+        print_user_property(event->property->user_property);
+        esp_mqtt5_client_set_publish_property(client, &publish_property);
+        msg_id = esp_mqtt_client_publish(client, "blegate/up", "rec data", 0, 0, 0);
+        ESP_LOGI(TAG, "sent publish 'blegate/up' successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -202,7 +278,7 @@ static void mqtt5_app_start(void)
 {
     esp_mqtt5_connection_property_config_t connect_property = {
         .session_expiry_interval = 10,
-        .maximum_packet_size = 1024,
+        .maximum_packet_size = MQTT_RX_MAX_MSG_LEN,
         .receive_maximum = 65535,
         .topic_alias_maximum = 2,
         .request_resp_info = true,
@@ -220,8 +296,10 @@ static void mqtt5_app_start(void)
         .network.disable_auto_reconnect = true,
         .credentials.username = "mqtt2",
         .credentials.authentication.password = "123456",
-        
-        .session.last_will.topic = "/topic/will", //"/topic/will",           
+        .buffer.size = MQTT_RX_MAX_MSG_LEN,                 //set  max msg len
+        .buffer.out_size = 1024,
+
+        .session.last_will.topic = "/blegate/will", //"/topic/will",           
         .session.last_will.msg = "i will leave",
         .session.last_will.msg_len = 12,
         .session.last_will.qos = 1,
@@ -296,5 +374,6 @@ void app_main(void)
      */
     ESP_ERROR_CHECK(example_connect());
 
+    app_uart_start();
     mqtt5_app_start();
 }
