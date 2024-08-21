@@ -13,6 +13,7 @@ typedef enum {
     BT_IDLE = 0,
     BT_READY,
     BT_DISCONN,
+    BT_CONNING,
     BT_CONN,
 } bt_state_t;
 
@@ -20,10 +21,12 @@ typedef enum {
 typedef struct {
     uint8_t *data;
     size_t length;
+    char sn[32];         //str
+    char cmd[32];        //str
 } uart_packet_t;
 
 
 extern bt_state_t m_bt_state;
 
-void uart_send_data(const uint8_t *data, size_t length);
+void uart_send_data(const char *pcmd, const char *psn, const uint8_t *data, size_t length);
 extern void app_uart_start(void);

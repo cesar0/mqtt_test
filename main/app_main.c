@@ -11,16 +11,19 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
+#include "esp_err.h"
 #include "esp_netif.h"
 #include "protocol_examples_common.h"
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "driver/gpio.h"
 #include "uart_async_rxtxtasks.h"
+#include "esp_wifi.h"
 
 static const char *TAG = "mqtt5_example";
 
-#define MQTT_RX_MAX_MSG_LEN       1024*9  
+#define MQTT_RX_MAX_MSG_LEN       1024*20
+bool wifi_connected = false;
 
 
 // 将单个字符转换为对应的16进制值
@@ -62,12 +65,12 @@ int string_to_hex(const char *str, uint8_t **out, size_t *out_len) {
     return 0; // 成功
 }
 
-int uart_send_mqtt_msg(const char *str) {
+int uart_send_mqtt_msg(const char *pcmd, const char *psn, const char *str) {
     uint8_t *hex_data;
     size_t hex_len;
 
     if (string_to_hex(str, &hex_data, &hex_len) == 0) {
-        uart_send_data(hex_data, hex_len);
+        uart_send_data(pcmd, psn, hex_data, hex_len);
         free(hex_data);
     } else {
         ESP_LOGE(TAG, "Failed to convert string to hex.\n");
@@ -92,11 +95,7 @@ void mqtt_decode(char* buf, int len)
     }
     if(index != 3) return;
     ESP_LOGI(TAG,"mqttp_msg:\n<cmd>%s\n <sn>%s\n <data%d>%s\n",mqttp_msg[0],mqttp_msg[1],strlen(mqttp_msg[2]),mqttp_msg[2]);
-    if(m_bt_state == BT_CONN || 1){
-        uart_send_mqtt_msg(mqttp_msg[2]);
-    }else{
-        ESP_LOGE(TAG, "Failed to connetc bt module.\n");
-    }
+    uart_send_mqtt_msg(mqttp_msg[0], mqttp_msg[1], mqttp_msg[2]);
 }
 
 
@@ -350,6 +349,23 @@ static void mqtt5_app_start(void)
     esp_mqtt_client_start(client);
 }
 
+
+static void handler_on_wifi_disconnect(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    wifi_connected = false;
+    ESP_LOGI(TAG, "wifi disconnected......");
+}
+
+static void handler_on_wifi_connect(void *esp_netif, esp_event_base_t event_base,
+                            int32_t event_id, void *event_data)
+{
+    wifi_connected = true;
+    ESP_LOGI(TAG, "wifi connected......");
+}
+
+
+
 void app_main(void)
 {
 
@@ -389,13 +405,15 @@ void app_main(void)
     gpio_config(&io_conf);
     gpio_set_level(GPIO_OUTPUT_IO_0, 1);
 
+    app_uart_start();
 
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
      * examples/protocols/README.md for more information about this function.
      */
-    ESP_ERROR_CHECK(example_connect());
+    example_connect();
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &handler_on_wifi_disconnect));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &handler_on_wifi_connect));
 
-    app_uart_start();
     mqtt5_app_start();
 }

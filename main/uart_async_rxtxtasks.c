@@ -28,6 +28,8 @@ static QueueHandle_t uart_queue;
 
 
 bt_state_t m_bt_state;
+uint32_t m_bt_state_timer;
+
 
 void init(void)
 {
@@ -51,7 +53,7 @@ void init(void)
 
 
 // 串口任务发送函数
-void uart_send_data(const uint8_t *data, size_t length) {
+void uart_send_data(const char *pcmd,const char *psn, const uint8_t *data, size_t length) {
     uart_packet_t packet;
 
     // 分配内存保存数据
@@ -66,9 +68,14 @@ void uart_send_data(const uint8_t *data, size_t length) {
     }
 
     // 复制数据
+    memcpy(packet.cmd, pcmd, strlen(pcmd)+1);
+    memcpy(packet.sn, psn, strlen(psn)+1);
     memcpy(packet.data, data, length);
     packet.length = length;
-    ESP_LOGI(TAG, "uart_send_data len=%d\n",length);
+    ESP_LOGI(TAG, "uart_send_data %s %s len=%d\n",packet.cmd, packet.sn, length);
+    if('A' == data[0]  && 'T' == data[1]){
+        ESP_LOGI(TAG, "%s\n",data);
+    }
 
     // if (portCHECK_IF_IN_ISR()) {
     //     // 当前在中断上下文中
@@ -92,18 +99,67 @@ void uart_tx_task(void *pvParameters) {
 
     while (1) {
         // 等待从队列中接收数据
-        if (xQueueReceive(uart_queue, &packet, portMAX_DELAY)) {
-            // ESP_LOGI(TAG, "uart_tx_task=%.*s", packet.length, (const char *)packet.data);
-            // 发送数据到串口
-            uart_write_bytes(UART_NUM_2, (const char *)packet.data, packet.length);
-            // 发送完成后释放内存
-            free(packet.data);
+        if (xQueuePeek(uart_queue, &packet, portMAX_DELAY)) {
+            switch(m_bt_state){
+            case BT_IDLE:
+            case BT_READY:
+            case BT_DISCONN:
+                //发送连接指令
+                // char *at_conn_dev = "AT+CESL=85AC00093535\r";
+                // char *at_conn_dev = "AT+CESL=665544332212\r";
+                char at_conn_dev[32];
+                memset(at_conn_dev, 0, sizeof(at_conn_dev));
+                memcpy(at_conn_dev,"AT+CESL=", strlen("AT+CESL="));
+                memcpy(at_conn_dev + strlen("AT+CESL="),packet.sn, 12);
+                memcpy(at_conn_dev + strlen("AT+CESL=") + 12 ,"\r", 1);
+                uart_write_bytes(UART_NUM_2,(const uint8_t *)at_conn_dev, strlen(at_conn_dev));
+                m_bt_state = BT_CONNING;
+                m_bt_state_timer = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                ESP_LOGI(TAG, "uart_write_bytes len=%d: %s\n",strlen(at_conn_dev),at_conn_dev);
+                break;
+            case BT_CONNING:
+                ESP_LOGI(TAG,"BT_CONNING...\n");
+
+                 if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 30*1000){
+                    ESP_LOGI(TAG,"uart bt connect timeout.....\n");
+                    do{
+                        if (xQueueReceive(uart_queue, &packet, 0) == pdPASS) {      
+                            ESP_LOGI(TAG,"BT_CONNTIMEOUT consumer msg: %s %s...\n",packet.cmd, packet.sn);
+                        }else{
+                            break;
+                        }
+                    }while(memcmp(packet.cmd, "wb", 2));
+
+                    m_bt_state = BT_DISCONN;
+                }else{
+                    vTaskDelay(pdMS_TO_TICKS(1000));  // 1000毫秒 = 1秒
+                }  
+                break;
+            case BT_CONN:
+                if (xQueueReceive(uart_queue, &packet, 0) == pdPASS) {
+                    // ESP_LOGI(TAG, "uart_tx_task=%.*s", packet.length, (const char *)packet.data);
+                    // 发送数据到串口
+                    if(0 == memcmp(packet.cmd, "wb", 2)){ 
+                        uart_write_bytes(UART_NUM_2, (const char *)packet.data, packet.length);
+                        ESP_LOGI(TAG, "uart_write_bytes %s %s len=%d.....\n",packet.cmd, packet.sn, packet.length);
+                        // uart_write_bytes(UART_NUM_2, (const char *)buf, sizeof(buf));
+                        // ESP_LOGI(TAG, "uart_write_bytes %s %s len=%d.....\n",packet.cmd, packet.sn, sizeof(buf));
+                    }
+                    // 发送完成后释放内存
+                    free(packet.data);
+                    vTaskDelay(pdMS_TO_TICKS(10));  // 1000毫秒 = 1秒
+                }
+            break;
+            default:
+                vTaskDelay(pdMS_TO_TICKS(10));  // 1000毫秒 = 1秒
+            break;
+            }
         }
     }
 }
 
 
-static void rx_task(void *arg)
+static void uart_rx_task(void *arg)
 {
     uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE + 1);
     if(NULL == data){
@@ -117,10 +173,6 @@ static void rx_task(void *arg)
             
             if(strlen("\r\nIM_READY") <= rxBytes && 0 == memcmp("\r\nIM_READY", data, strlen("\r\nIM_READY"))){
                 m_bt_state = BT_READY;
-                //发送连接指令
-                char *at_conn_dev = "AT+CESL=85AC00093535\r";
-                uart_send_data((const uint8_t *)at_conn_dev, strlen(at_conn_dev));
-
             }else if(strlen("\r\nIM_CONN") <= rxBytes && 0 == memcmp("\r\nIM_CONN", data, strlen("\r\nIM_CONN"))){
                 m_bt_state = BT_CONN;
             }else if(strlen("\r\nIM_DISC") <= rxBytes && 0 == memcmp("\r\nIM_DISC", data, strlen("\r\nIM_DISC"))){
@@ -131,15 +183,38 @@ static void rx_task(void *arg)
     free(data);
 }
 
+
+// UART 发送任务
+void uart_task(void *pvParameters) {
+    uart_packet_t packet;
+
+    while (1) {
+        switch(m_bt_state){
+            case BT_READY:
+            case BT_DISCONN:
+                break;
+            case BT_CONNING:
+                break;
+            case BT_CONN:
+                break;
+            default:
+                break;
+        }
+        // 执行自定义任务的代码
+        ESP_LOGI(TAG,"uart task running, m_bt_state=%d\n",m_bt_state);
+        // 等待1秒
+        vTaskDelay(pdMS_TO_TICKS(10000));  // 1000毫秒 = 1秒
+    }
+}
+
+
 void app_uart_start(void)
 {
     init();
-    xTaskCreate(rx_task, "uart_rx_task", 1024 * 2, NULL, configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(uart_rx_task, "uart_rx_task", 1024 * 2, NULL, configMAX_PRIORITIES - 1, NULL);
     
     // 创建 UART 发送任务
-    xTaskCreate(uart_tx_task, "uart_tx_task", 1024 * 2, NULL, configMAX_PRIORITIES-2, NULL);
+    xTaskCreate(uart_tx_task, "uart_tx_task", 1024 * 2, NULL, configMAX_PRIORITIES-5, NULL);
 
-    // 示例发送数据
-    uint8_t example_data[] = {0x48, 0x65, 0x6C, 0x6C, 0x6F}; // "Hello" in ASCII
-    uart_send_data(example_data, sizeof(example_data));
+    xTaskCreate(uart_task, "uart_task", 1024 * 2, NULL, configMAX_PRIORITIES-10, NULL);
 }
