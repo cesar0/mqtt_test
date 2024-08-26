@@ -15,6 +15,7 @@ typedef enum {
     BT_DISCONN,
     BT_CONNING,
     BT_CONN,
+    BT_CONN_WRITE_END,
 } bt_state_t;
 
 // 定义一个数据结构来保存要发送的数据
@@ -23,10 +24,11 @@ typedef struct {
     size_t length;
     char sn[32];         //str
     char cmd[32];        //str
+    uint8_t retry;
 } uart_packet_t;
 
 
 extern bt_state_t m_bt_state;
 
-void uart_send_data(const char *pcmd, const char *psn, const uint8_t *data, size_t length);
+void uart_push_queue(const char *pcmd, const char *psn, const uint8_t *data, size_t length, uint8_t retry);
 extern void app_uart_start(void);

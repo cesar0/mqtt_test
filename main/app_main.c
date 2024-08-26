@@ -19,12 +19,18 @@
 #include "driver/gpio.h"
 #include "uart_async_rxtxtasks.h"
 #include "esp_wifi.h"
+#include "esp_eth.h"
+#include "led_strip.h"
 
 static const char *TAG = "mqtt5_example";
 
-#define MQTT_RX_MAX_MSG_LEN       1024*20
-bool wifi_connected = false;
+extern void led_init(void);
 
+#define MQTT_RX_MAX_MSG_LEN       1024*40
+bool wifi_connected = false;
+bool etg_connected = false;
+bool mqtt_connected = false;
+esp_mqtt_client_handle_t mqtt_client = NULL;
 
 // 将单个字符转换为对应的16进制值
 int char_to_hex(char c) {
@@ -43,12 +49,14 @@ int char_to_hex(char c) {
 int string_to_hex(const char *str, uint8_t **out, size_t *out_len) {
     size_t len = strlen(str);
     if (len % 2 != 0) {
+        ESP_LOGE(TAG, "string_to_hex len err\n");
         return -1; // 输入字符串长度必须是偶数
     }
 
     *out_len = len / 2;
     *out = (uint8_t *)malloc(*out_len);
     if (*out == NULL) {
+        ESP_LOGE(TAG, "string_to_hex no memory\n");
         return -1; // 内存分配失败
     }
 
@@ -57,6 +65,7 @@ int string_to_hex(const char *str, uint8_t **out, size_t *out_len) {
         int low = char_to_hex(str[i + 1]);
         if (high == -1 || low == -1) {
             free(*out);
+            ESP_LOGE(TAG, "string_to_hex data err\n");
             return -1; // 非法字符
         }
         (*out)[i / 2] = (high << 4) | low;
@@ -65,12 +74,12 @@ int string_to_hex(const char *str, uint8_t **out, size_t *out_len) {
     return 0; // 成功
 }
 
-int uart_send_mqtt_msg(const char *pcmd, const char *psn, const char *str) {
+int uart_send_mqtt_msg(const char *pcmd, const char *psn, const char *str, uint8_t retry) {
     uint8_t *hex_data;
     size_t hex_len;
 
     if (string_to_hex(str, &hex_data, &hex_len) == 0) {
-        uart_send_data(pcmd, psn, hex_data, hex_len);
+        uart_push_queue(pcmd, psn, hex_data, hex_len, retry);
         free(hex_data);
     } else {
         ESP_LOGE(TAG, "Failed to convert string to hex.\n");
@@ -88,14 +97,14 @@ void mqtt_decode(char* buf, int len)
     datp = strtok(buf, " ");
     while(datp){
         mqttp_msg[index] = datp;
-        // logd("\t%s", mqttp_msg[index]);
+        // ESP_LOGI("\t%s", mqttp_msg[index]);
         index++;
         if(index >= 3) break;
         datp = strtok(NULL," ");
     }
     if(index != 3) return;
     ESP_LOGI(TAG,"mqttp_msg:\n<cmd>%s\n <sn>%s\n <data%d>%s\n",mqttp_msg[0],mqttp_msg[1],strlen(mqttp_msg[2]),mqttp_msg[2]);
-    uart_send_mqtt_msg(mqttp_msg[0], mqttp_msg[1], mqttp_msg[2]);
+    uart_send_mqtt_msg(mqttp_msg[0], mqttp_msg[1], mqttp_msg[2], 1);
 }
 
 
@@ -190,11 +199,13 @@ static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32
     esp_mqtt_event_handle_t event = event_data;
     esp_mqtt_client_handle_t client = event->client;
     int msg_id;
-
+ 
     ESP_LOGD(TAG, "free heap size is %" PRIu32 ", minimum %" PRIu32, esp_get_free_heap_size(), esp_get_minimum_free_heap_size());
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        mqtt_connected = true;
+        mqtt_client = client;
 
         //连接发送连接成功消息
         print_user_property(event->property->user_property);
@@ -208,7 +219,7 @@ static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32
         //订阅消息
         esp_mqtt5_client_set_user_property(&subscribe_property.user_property, user_property_arr, USE_PROPERTY_ARR_SIZE);
         esp_mqtt5_client_set_subscribe_property(client, &subscribe_property);
-        msg_id = esp_mqtt_client_subscribe(client, "blegate/master1/down", 0);
+        msg_id = esp_mqtt_client_subscribe(client, "blegate/master2/down", 0);
         esp_mqtt5_client_delete_user_property(subscribe_property.user_property);
         subscribe_property.user_property = NULL;
         ESP_LOGI(TAG, "sent subscribe '/topic/qos0' successful, msg_id=%d", msg_id);
@@ -217,7 +228,8 @@ static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32
     case MQTT_EVENT_DISCONNECTED:                   
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         print_user_property(event->property->user_property);
-        esp_mqtt_client_reconnect(client);         //TODO 会概率断开网络连接, 重连前判断网络连接
+        mqtt_connected = false;
+        mqtt_client = client;
         break;
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
@@ -350,18 +362,69 @@ static void mqtt5_app_start(void)
 }
 
 
+
+/**
+ * @brief Checks the netif description if it contains specified prefix.
+ * All netifs created withing common connect component are prefixed with the module TAG,
+ * so it returns true if the specified netif is owned by this module
+ */
+static bool example_is_our_netif(const char *prefix, esp_netif_t *netif)
+{
+    return strncmp(prefix, esp_netif_get_desc(netif), strlen(prefix) - 1) == 0;
+}
 static void handler_on_wifi_disconnect(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     wifi_connected = false;
     ESP_LOGI(TAG, "wifi disconnected......");
 }
-
 static void handler_on_wifi_connect(void *esp_netif, esp_event_base_t event_base,
                             int32_t event_id, void *event_data)
 {
+    // ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    // if (!example_is_our_netif(EXAMPLE_NETIF_DESC_STA, event->esp_netif)) {
+    //     return;
+    // }
+
     wifi_connected = true;
     ESP_LOGI(TAG, "wifi connected......");
+}
+static void eth_on_got_ip(void *arg, esp_event_base_t event_base,
+                      int32_t event_id, void *event_data)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    if (!example_is_our_netif(EXAMPLE_NETIF_DESC_ETH, event->esp_netif)) {
+        return;
+    }
+    etg_connected = true;
+    ESP_LOGI(TAG, "eth connected......");
+}
+
+static void eth_on_lost_ip(void *arg, esp_event_base_t event_base,
+                      int32_t event_id, void *event_data)
+{
+    // ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    // if (!example_is_our_netif(EXAMPLE_NETIF_DESC_ETH, event->esp_netif)) {
+    //     return;
+    // }
+    etg_connected = false;
+    ESP_LOGI(TAG, "eth disconnected......");
+}
+
+// 网络连接任务
+void network_task(void *pvParameters) {
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));  //20秒回连
+
+        ESP_LOGI(TAG, "eth connected=%d wifi connected=%d mqtt=%d(%x)......",etg_connected, wifi_connected, mqtt_connected, (int)mqtt_client);
+        if( 0 == (wifi_connected || etg_connected)){
+            esp_err_t err = esp_wifi_connect();
+            ESP_LOGI(TAG, "esp_wifi_connect err=%x",err);
+        }else if((false == mqtt_connected) && (NULL != mqtt_client) ){
+            esp_mqtt_client_reconnect(mqtt_client);   
+        }
+    }
 }
 
 
@@ -406,14 +469,20 @@ void app_main(void)
     gpio_set_level(GPIO_OUTPUT_IO_0, 1);
 
     app_uart_start();
+    led_init();
 
     /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
      * Read "Establishing Wi-Fi or Ethernet Connection" section in
      * examples/protocols/README.md for more information about this function.
      */
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &handler_on_wifi_disconnect,NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &handler_on_wifi_connect,NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_on_got_ip, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, &eth_on_lost_ip, NULL));
     example_connect();
-    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &handler_on_wifi_disconnect));
-    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &handler_on_wifi_connect));
+    xTaskCreate(network_task, "network_task", 1024*10, NULL, configMAX_PRIORITIES-10, NULL);
 
     mqtt5_app_start();
+    
+    
 }

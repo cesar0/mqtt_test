@@ -1,8 +1,7 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "terminal.integrated.defaultProfile.windows": "PowerShell",
   "idf.adapterTargetName": "esp32",
-  "idf.portWin": "COM3",
+  "idf.portWin": "COM10",
   "files.associations": {
     "Makefile": "makefile",
     "array": "c",
@@ -33,7 +32,13 @@
     "stdint.h": "c",
     "esp_wifi.h": "c",
     "esp_event.h": "c",
-    "cstdint": "c"
+    "cstdint": "c",
+    "ulp_riscv_utils.h": "c",
+    "gpio.h": "c",
+    "esp_netif.h": "c",
+    "stdbool.h": "c",
+    "led_strip_interface.h": "c",
+    "sdkconfig.h": "c"
   },
   "idf.openOcdConfigs": [
     "board/esp32-ethernet-kit-3.3v.cfg"
@@ -41,6 +46,7 @@
 
 
   //ESP-IDF
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
   "idf.gitPathWin": "c:\\Users\\lixue\\esp-idf\\esp-idf_v5.2.2\\tools\\tools\\idf-git\\2.39.2\\cmd\\git.exe",
   "idf.espIdfPathWin": "c:\\Users\\lixue\\esp-idf\\esp-idf_v5.2.2\\v5.2.2\\esp-idf",
   "idf.pythonBinPathWin": "c:\\Users\\lixue\\esp-idf\\esp-idf_v5.2.2\\tools\\python_env\\idf5.2_py3.11_env\\Scripts\\python.exe",

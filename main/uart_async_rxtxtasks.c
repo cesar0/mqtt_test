@@ -19,13 +19,14 @@
 static const char *TAG = "uart_example";
 
 
-static const int RX_BUF_SIZE = 1024;
-static QueueHandle_t uart_queue;
-
-
 #define TXD_PIN (GPIO_NUM_17)
 #define RXD_PIN (GPIO_NUM_5)
 
+static const int RX_BUF_SIZE = 1024;
+
+
+static QueueHandle_t uart_queue;
+uart_packet_t  m_uart_packet;               //保存当前标签数据
 
 bt_state_t m_bt_state;
 uint32_t m_bt_state_timer;
@@ -34,6 +35,7 @@ uint32_t m_bt_state_timer;
 void init(void)
 {
     m_bt_state = BT_IDLE;
+    memset(&m_uart_packet, 0, sizeof(m_uart_packet));
     const uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -53,17 +55,19 @@ void init(void)
 
 
 // 串口任务发送函数
-void uart_send_data(const char *pcmd,const char *psn, const uint8_t *data, size_t length) {
+void uart_push_queue(const char *pcmd,const char *psn, const uint8_t *data, size_t length, uint8_t retry) {
     uart_packet_t packet;
 
+    if(0 != memcmp(pcmd, "wb", 2))    return;                  //只处理wb
+    
     // 分配内存保存数据
     packet.data = (uint8_t *)malloc(length);
     if (packet.data == NULL) {
-        ESP_LOGI(TAG, "uart_send_data data is NULL");
+        ESP_LOGI(TAG, "uart_push_queue data is NULL");
         return;
     }
     if (length == 0) {
-        ESP_LOGI(TAG, "uart_send_data LENGTH is 0");
+        ESP_LOGI(TAG, "uart_push_queue LENGTH is 0");
         return;
     }
 
@@ -71,19 +75,12 @@ void uart_send_data(const char *pcmd,const char *psn, const uint8_t *data, size_
     memcpy(packet.cmd, pcmd, strlen(pcmd)+1);
     memcpy(packet.sn, psn, strlen(psn)+1);
     memcpy(packet.data, data, length);
+    packet.retry = retry;
     packet.length = length;
-    ESP_LOGI(TAG, "uart_send_data %s %s len=%d\n",packet.cmd, packet.sn, length);
+    ESP_LOGI(TAG, "uart_queue %s %s len=%d\n",packet.cmd, packet.sn, length);
     if('A' == data[0]  && 'T' == data[1]){
         ESP_LOGI(TAG, "%s\n",data);
     }
-
-    // if (portCHECK_IF_IN_ISR()) {
-    //     // 当前在中断上下文中
-    //     ESP_LOGI(TAG, "In ISR,,,,,,,,,,,,,,,,\n");
-    // } else {
-    //     // 当前不在中断上下文中
-    //     ESP_LOGI(TAG, "Not in ISR,,,,,,,,,,,,,,,\n");
-    // }
 
     // 检查队列剩余空间
     UBaseType_t spacesAvailable = uxQueueSpacesAvailable(uart_queue);
@@ -118,13 +115,13 @@ void uart_tx_task(void *pvParameters) {
                 ESP_LOGI(TAG, "uart_write_bytes len=%d: %s\n",strlen(at_conn_dev),at_conn_dev);
                 break;
             case BT_CONNING:
-                ESP_LOGI(TAG,"BT_CONNING...\n");
+                ESP_LOGI(TAG,"conning %s\n", packet.sn);
 
-                 if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 30*1000){
-                    ESP_LOGI(TAG,"uart bt connect timeout.....\n");
+                 if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 20*1000){
+                    ESP_LOGE(TAG,"uart bt connect timeout.....\n");
                     do{
                         if (xQueueReceive(uart_queue, &packet, 0) == pdPASS) {      
-                            ESP_LOGI(TAG,"BT_CONNTIMEOUT consumer msg: %s %s...\n",packet.cmd, packet.sn);
+                            ESP_LOGE(TAG,"BT_CONNTIMEOUT consumer msg: %s %s...\n",packet.cmd, packet.sn);
                         }else{
                             break;
                         }
@@ -132,7 +129,7 @@ void uart_tx_task(void *pvParameters) {
 
                     m_bt_state = BT_DISCONN;
                 }else{
-                    vTaskDelay(pdMS_TO_TICKS(1000));  // 1000毫秒 = 1秒
+                    vTaskDelay(pdMS_TO_TICKS(2000));  // 1000毫秒 = 1秒
                 }  
                 break;
             case BT_CONN:
@@ -142,14 +139,26 @@ void uart_tx_task(void *pvParameters) {
                     if(0 == memcmp(packet.cmd, "wb", 2)){ 
                         uart_write_bytes(UART_NUM_2, (const char *)packet.data, packet.length);
                         ESP_LOGI(TAG, "uart_write_bytes %s %s len=%d.....\n",packet.cmd, packet.sn, packet.length);
-                        // uart_write_bytes(UART_NUM_2, (const char *)buf, sizeof(buf));
-                        // ESP_LOGI(TAG, "uart_write_bytes %s %s len=%d.....\n",packet.cmd, packet.sn, sizeof(buf));
+
+                        // 发送完成后等待断连连接再释放数据
+                        m_bt_state_timer = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                        m_uart_packet = packet;
+                        m_bt_state = BT_CONN_WRITE_END;
                     }
-                    // 发送完成后释放内存
-                    free(packet.data);
-                    vTaskDelay(pdMS_TO_TICKS(10));  // 1000毫秒 = 1秒
+                    
                 }
-            break;
+                break;
+            case BT_CONN_WRITE_END:
+                if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 10*1000){
+                    ESP_LOGE(TAG,"uart bt disconnect timeout.....\n");
+                    free(m_uart_packet.data);
+                    memset(&m_uart_packet, 0, sizeof(m_uart_packet));
+                    m_bt_state = BT_DISCONN;
+                }else{
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }  
+
+                break;
             default:
                 vTaskDelay(pdMS_TO_TICKS(10));  // 1000毫秒 = 1秒
             break;
@@ -159,28 +168,79 @@ void uart_tx_task(void *pvParameters) {
 }
 
 
-static void uart_rx_task(void *arg)
+// IM_DISC,0001 REASON:13
+char* uart_decode_value(char* buf, int len)
 {
-    uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE + 1);
-    if(NULL == data){
+    int index=0;
+    char* uart_msg[5];
+    char *datp;
+
+    datp = strtok(buf, ":");
+    while(datp){
+        uart_msg[index] = datp;
+        // ESP_LOGI("\t%s", datp);
+        index++;
+        datp = strtok(NULL,":");
+    }
+
+    // ESP_LOGI(TAG,"uart_msg: <cmd>%s\n <val>%s\n",uart_msg[0],uart_msg[1]);
+    return uart_msg[1];
+}
+
+static void uart_rx_task(void *arg)
+{   
+    uint8_t* data;
+    uint8_t* raw_data = (uint8_t*) malloc(RX_BUF_SIZE + 1);
+    if(NULL == raw_data){
          ESP_LOGI(TAG, "rx_task malloc NULL.");
     }
     while (1) {
-        const int rxBytes = uart_read_bytes(UART_NUM_2, data, RX_BUF_SIZE, 100 / portTICK_PERIOD_MS);
+        int rxBytes = uart_read_bytes(UART_NUM_2, raw_data, RX_BUF_SIZE, 100 / portTICK_PERIOD_MS);
         if (rxBytes > 0) {
-            data[rxBytes] = 0;
+            raw_data[rxBytes] = 0;
+            data = raw_data;
+
+            if(('\r' == data[0]) || ('\n' == data[0])){
+                data++;
+                rxBytes--;
+                if (0 == rxBytes) continue;
+                if(('\r' == data[0]) || ('\n' == data[0])){
+                    data++;
+                    rxBytes--;
+                }
+            }
+            if (0 == rxBytes) continue;
             ESP_LOGI(TAG, "Read %d bytes: '%s'", rxBytes, data);
             
-            if(strlen("\r\nIM_READY") <= rxBytes && 0 == memcmp("\r\nIM_READY", data, strlen("\r\nIM_READY"))){
+            if(strlen("IM_REAY") <= rxBytes && 
+                ((0 == memcmp("IM_REAY", data, strlen("IM_REAY")))
+                || (0 == memcmp("IM_READY", data, strlen("IM_READY"))))){
                 m_bt_state = BT_READY;
-            }else if(strlen("\r\nIM_CONN") <= rxBytes && 0 == memcmp("\r\nIM_CONN", data, strlen("\r\nIM_CONN"))){
+                ESP_LOGI(TAG, "BT_READY...");
+            }else if(strlen("IM_CONN ") <= rxBytes &&
+                ((0 == memcmp("\r\nIM_CONN", data, strlen("\r\nIM_CONN")))
+                || (0 == memcmp("IM_CONN", data, strlen("IM_CONN"))))){
+                vTaskDelay(pdMS_TO_TICKS(20));  // 20毫秒延时后再设置conn
                 m_bt_state = BT_CONN;
-            }else if(strlen("\r\nIM_DISC") <= rxBytes && 0 == memcmp("\r\nIM_DISC", data, strlen("\r\nIM_DISC"))){
+                ESP_LOGI(TAG, "BT_CONN...");
+            }else if(strlen("IM_DISC") <= rxBytes && 
+                 ((0 == memcmp("\r\nIM_DISC", data, strlen("\r\nIM_DISC")))
+                || (0 == memcmp("IM_DISC", data, strlen("IM_DISC"))))){
                 m_bt_state = BT_DISCONN;
+                char* reson_str = uart_decode_value((char*)data, rxBytes);
+                ESP_LOGI(TAG, "BT_DISCONN sn=%s retry=%d reson=%s,...",m_uart_packet.sn,m_uart_packet.retry,reson_str);
+                if(memcmp("13", reson_str, strlen("13"))){
+                    if(m_uart_packet.retry--){
+                        ESP_LOGE(TAG, "ERROR retry sn=%s!",m_uart_packet.sn);
+                        uart_push_queue(m_uart_packet.cmd,m_uart_packet.sn, m_uart_packet.data, m_uart_packet.length, m_uart_packet.retry);
+                    }
+                }
+                free(m_uart_packet.data);
+                memset(&m_uart_packet, 0, sizeof(m_uart_packet));
             }
         }
     }
-    free(data);
+    free(raw_data);
 }
 
 
@@ -190,18 +250,27 @@ void uart_task(void *pvParameters) {
 
     while (1) {
         switch(m_bt_state){
+            case BT_IDLE:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_IDLE\n",m_bt_state);
+                break;
             case BT_READY:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_READY\n",m_bt_state);
+                break;
             case BT_DISCONN:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_DISCONN\n",m_bt_state);
                 break;
             case BT_CONNING:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_CONNING\n",m_bt_state);
                 break;
             case BT_CONN:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_CONN\n",m_bt_state);
+                break;
+            case BT_CONN_WRITE_END:
+                ESP_LOGI(TAG,"m_bt_state=%d BT_CONN_WRITE_END\n",m_bt_state);
                 break;
             default:
                 break;
         }
-        // 执行自定义任务的代码
-        ESP_LOGI(TAG,"uart task running, m_bt_state=%d\n",m_bt_state);
         // 等待1秒
         vTaskDelay(pdMS_TO_TICKS(10000));  // 1000毫秒 = 1秒
     }
@@ -216,5 +285,5 @@ void app_uart_start(void)
     // 创建 UART 发送任务
     xTaskCreate(uart_tx_task, "uart_tx_task", 1024 * 2, NULL, configMAX_PRIORITIES-5, NULL);
 
-    xTaskCreate(uart_task, "uart_task", 1024 * 2, NULL, configMAX_PRIORITIES-10, NULL);
+    // xTaskCreate(uart_task, "uart_task", 1024 * 2, NULL, configMAX_PRIORITIES-10, NULL);
 }
