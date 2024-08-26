@@ -117,7 +117,7 @@ void uart_tx_task(void *pvParameters) {
             case BT_CONNING:
                 ESP_LOGI(TAG,"conning %s\n", packet.sn);
 
-                 if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 20*1000){
+                 if(xTaskGetTickCount() * portTICK_PERIOD_MS - m_bt_state_timer > 25*1000){
                     ESP_LOGE(TAG,"uart bt connect timeout.....\n");
                     do{
                         if (xQueueReceive(uart_queue, &packet, 0) == pdPASS) {      
